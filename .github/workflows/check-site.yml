@@ -1,0 +1,29 @@
+name: Check ETU admission lists
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check admission list updates
+        shell: bash
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+
+          curl \
+            --fail \
+            --show-error \
+            --silent \
+            --max-time 180 \
+            --retry 2 \
+            --retry-delay 10 \
+            -H "X-Cron-Secret: ${CRON_SECRET}" \
+            "https://etu-admission-bot.onrender.com/cron/check"

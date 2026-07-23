@@ -17,6 +17,10 @@ services:
         generateValue: true
       - key: CRON_SECRET
         generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: etu-admission-db
+          property: connectionString
       - key: APPLICANT_CODE
         value: "1203485"
       - key: FORECAST_SIMULATIONS
@@ -25,3 +29,9 @@ services:
         value: "2"
       - key: SEED
         value: "20260723"
+
+databases:
+  - name: etu-admission-db
+    plan: free
+    databaseName: etu_admission
+    user: etu_admission

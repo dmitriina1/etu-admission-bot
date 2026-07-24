@@ -24,6 +24,7 @@ from database import (
 from etu_rank import (
     SCENARIOS,
     Applicant,
+    applicant_outranks,
     exact_metrics,
     fetch_html,
     find_target,
@@ -96,7 +97,20 @@ class Choice:
     direction_code: str
     priority: int
     score: int
+    special_score: int
+    language_score: int
+    achievements_score: int
     numeric_code: int
+
+    @property
+    def ranking_key(self) -> tuple[int, int, int, int, int]:
+        return (
+            -self.score,
+            -self.special_score,
+            -self.language_score,
+            -self.achievements_score,
+            self.numeric_code,
+        )
 
 
 def telegram_call(method: str, payload: dict) -> dict:
@@ -354,13 +368,7 @@ def vectorized_forecast(
 
         for applicant in competitors:
             if applicant.has_known_score:
-                outranks = (
-                    applicant.real_score > target.real_score
-                    or (
-                        applicant.real_score == target.real_score
-                        and int(applicant.code) < target_code
-                    )
-                )
+                outranks = applicant_outranks(applicant, target)
                 if outranks:
                     p = stay_probability(applicant, scenario, unknown=False)
                     above += rng.random(simulations) <= p
@@ -392,6 +400,10 @@ def vectorized_forecast(
                         rng.triangular(low, (low + high) / 2, high, count)
                     ).astype(np.int16)
 
+            # Для неизвестного результата известен только смоделированный общий
+            # балл. Состав результата пока неизвестен, поэтому при точном равенстве
+            # используем ID лишь как нейтральный последний критерий. После появления
+            # реальных компонентов применяется полный официальный порядок.
             outranks = (scores > target.real_score) | (
                 (scores == target.real_score) & (int(applicant.code) < target_code)
             )
@@ -426,7 +438,8 @@ def build_forecast_message(direction_code: str, applicant_code: str) -> str:
         f"🎲 <b>Прогноз: {html.escape(direction_code)} — {html.escape(snapshot.name)}</b>",
         f"Код: <code>{html.escape(applicant_code)}</code>",
         f"Данные обновлены: {html.escape(snapshot.updated_at)}",
-        f"Симуляций на сценарий: <b>{FORECAST_SIMULATIONS:,}</b>".replace(",", " ")
+        f"Симуляций на сценарий: <b>{FORECAST_SIMULATIONS:,}</b>".replace(",", " "),
+        "<i>Это сценарная модель, а не официальная вероятность.</i>",
     ]
     for result in results:
         lines.extend(
@@ -462,6 +475,9 @@ def build_choices(
                     direction_code=snapshot.direction_code,
                     priority=applicant.priority,
                     score=applicant.real_score,
+                    special_score=applicant.special_score,
+                    language_score=applicant.language_score,
+                    achievements_score=applicant.achievements_score,
                     numeric_code=int(applicant.code),
                 )
             )
@@ -515,10 +531,7 @@ def calculate_allocation(
             }
             ordered = sorted(
                 pool,
-                key=lambda code: (
-                    -choice_by_code[code].score,
-                    choice_by_code[code].numeric_code,
-                ),
+                key=lambda code: choice_by_code[code].ranking_key,
             )
             capacity = capacities[direction_code]
             accepted = ordered[:capacity] if capacity > 0 else []
@@ -548,19 +561,12 @@ def adjusted_position(
     if target is None:
         raise RuntimeError("Абитуриент отсутствует в направлении.")
 
-    target_code = int(target.code)
     above = [
         applicant
         for applicant in snapshot.all_applicants
         if applicant.code != applicant_code
         and is_eligible_for_allocation(applicant)
-        and (
-            applicant.real_score > target.real_score
-            or (
-                applicant.real_score == target.real_score
-                and int(applicant.code) < target_code
-            )
-        )
+        and applicant_outranks(applicant, target)
     ]
     removed: list[tuple[str, str]] = []
     for applicant in above:
@@ -627,6 +633,9 @@ def build_realplace_message(applicant_code: str) -> str:
 
     lines.extend(
         [
+            "",
+            "<i>Это расчётная модель. Она не заменяет официальный конкурсный список "
+            "и может измениться при новых баллах, согласиях и приоритетах.</i>",
         ]
     )
     return "\n".join(lines)

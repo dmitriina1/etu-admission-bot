@@ -266,14 +266,29 @@ def parse_applicants(html: str) -> list[Applicant]:
     return applicants
 
 
-def sorted_applicants(applicants: list[Applicant]) -> list[Applicant]:
-    return sorted(
-        applicants,
-        key=lambda applicant: (
-            -applicant.real_score,
-            int(applicant.code),
-        ),
+def applicant_sort_key(applicant: Applicant) -> tuple[int, int, int, int, int]:
+    """Официальный порядок при равном конкурсном балле.
+
+    Сначала сравнивается общий балл, затем специальная дисциплина,
+    иностранный язык, индивидуальные достижения и только потом ID.
+    Отрицательные значения нужны для сортировки по убыванию.
+    """
+    return (
+        -applicant.real_score,
+        -applicant.special_score,
+        -applicant.language_score,
+        -applicant.achievements_score,
+        int(applicant.code),
     )
+
+
+def sorted_applicants(applicants: list[Applicant]) -> list[Applicant]:
+    return sorted(applicants, key=applicant_sort_key)
+
+
+def applicant_outranks(left: Applicant, right: Applicant) -> bool:
+    """Возвращает True, если left должен стоять выше right."""
+    return applicant_sort_key(left) < applicant_sort_key(right)
 
 
 def find_target(
@@ -302,27 +317,17 @@ def exact_metrics(
         if applicant.code == applicant_code
     )
 
-    same_score = [
-        applicant for applicant in applicants
+    same_score_ordered = [
+        applicant for applicant in ordered
         if applicant.real_score == target.real_score
     ]
-    same_score_ordered = sorted(same_score, key=lambda a: int(a.code))
     same_score_position = next(
         index
         for index, applicant in enumerate(same_score_ordered, start=1)
         if applicant.code == applicant_code
     )
 
-    above = [
-        applicant for applicant in ordered
-        if (
-            applicant.real_score > target.real_score
-            or (
-                applicant.real_score == target.real_score
-                and int(applicant.code) < int(target.code)
-            )
-        )
-    ]
+    above = ordered[: position - 1]
 
     above_with_consent = sum(applicant.has_consent for applicant in above)
     unknown = [
@@ -441,7 +446,7 @@ def simulate_scenario(
 
     for _ in range(simulations):
         active: list[tuple[int, int]] = [
-            (target.real_score, int(target.code))
+            (target.real_score, target.special_score, target.language_score, target.achievements_score, int(target.code))
         ]
 
         for applicant in competitors:
@@ -453,7 +458,7 @@ def simulate_scenario(
                 )
                 if rng.random() <= probability:
                     active.append(
-                        (applicant.real_score, int(applicant.code))
+                        (applicant.real_score, applicant.special_score, applicant.language_score, applicant.achievements_score, int(applicant.code))
                     )
                 continue
 
@@ -473,13 +478,13 @@ def simulate_scenario(
                 rng,
                 scenario.unknown_score_bands,
             )
-            active.append((score, int(applicant.code)))
+            active.append((score, 0, 0, 0, int(applicant.code)))
 
-        active.sort(key=lambda item: (-item[0], item[1]))
+        active.sort(key=lambda item: (-item[0], -item[1], -item[2], -item[3], item[4]))
 
         target_position = next(
             index
-            for index, (_, code) in enumerate(active, start=1)
+            for index, (*_, code) in enumerate(active, start=1)
             if code == int(target.code)
         )
 

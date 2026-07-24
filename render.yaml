@@ -26,7 +26,7 @@ services:
       - key: FORECAST_SIMULATIONS
         value: "300000"
       - key: FORECAST_LIST
-        value: "2"
+        value: "2.3"
       - key: SEED
         value: "20260723"
 

@@ -99,6 +99,10 @@ class Scenario:
     # (нижняя граница, верхняя граница, вероятность).
     unknown_score_bands: tuple[tuple[int, int, float], ...]
 
+    # Распределения для отдельно отсутствующих компонентов.
+    special_score_bands: tuple[tuple[int, int, float], ...]
+    achievements_score_bands: tuple[tuple[int, int, float], ...]
+
 
 SCENARIOS = (
     Scenario(
@@ -120,6 +124,19 @@ SCENARIOS = (
             (111, 125, 0.045),
             (126, 150, 0.005),
         ),
+        special_score_bands=(
+            (14, 29, 0.25),
+            (30, 39, 0.35),
+            (40, 45, 0.30),
+            (46, 50, 0.10),
+        ),
+        achievements_score_bands=(
+            (0, 0, 0.55),
+            (1, 10, 0.20),
+            (11, 20, 0.15),
+            (21, 30, 0.08),
+            (31, 40, 0.02),
+        ),
     ),
     Scenario(
         name="Базовый",
@@ -140,6 +157,19 @@ SCENARIOS = (
             (111, 125, 0.085),
             (126, 150, 0.015),
         ),
+        special_score_bands=(
+            (14, 29, 0.15),
+            (30, 39, 0.30),
+            (40, 45, 0.35),
+            (46, 50, 0.20),
+        ),
+        achievements_score_bands=(
+            (0, 0, 0.35),
+            (1, 10, 0.20),
+            (11, 20, 0.20),
+            (21, 30, 0.18),
+            (31, 40, 0.07),
+        ),
     ),
     Scenario(
         name="Пессимистичный",
@@ -159,6 +189,19 @@ SCENARIOS = (
             (101, 110, 0.23),
             (111, 125, 0.17),
             (126, 150, 0.03),
+        ),
+        special_score_bands=(
+            (14, 29, 0.08),
+            (30, 39, 0.22),
+            (40, 45, 0.38),
+            (46, 50, 0.32),
+        ),
+        achievements_score_bands=(
+            (0, 0, 0.20),
+            (1, 10, 0.15),
+            (11, 20, 0.20),
+            (21, 30, 0.25),
+            (31, 40, 0.20),
         ),
     ),
 )
@@ -450,35 +493,42 @@ def simulate_scenario(
         ]
 
         for applicant in competitors:
-            if applicant.has_known_score:
-                probability = stay_probability(
-                    applicant,
-                    scenario,
-                    unknown=False,
-                )
-                if rng.random() <= probability:
-                    active.append(
-                        (applicant.real_score, applicant.special_score, applicant.language_score, applicant.achievements_score, int(applicant.code))
-                    )
+            # Ноль по иностранному языку означает недопуск: такого кандидата
+            # не моделируем и не включаем в итоговое распределение.
+            if applicant.language_score <= 0:
                 continue
 
-            # У кандидата пока нулевой/неполный результат.
-            if rng.random() > scenario.unknown_gets_score:
-                continue
-
+            incomplete = (
+                applicant.special_score <= 0
+                or applicant.achievements_score <= 0
+            )
             probability = stay_probability(
                 applicant,
                 scenario,
-                unknown=True,
+                unknown=incomplete,
             )
             if rng.random() > probability:
                 continue
 
-            score = sample_unknown_score(
-                rng,
-                scenario.unknown_score_bands,
+            special = applicant.special_score
+            achievements = applicant.achievements_score
+            if special <= 0:
+                special = sample_unknown_score(rng, scenario.special_score_bands)
+            if achievements <= 0:
+                achievements = sample_unknown_score(
+                    rng, scenario.achievements_score_bands
+                )
+
+            score = special + applicant.language_score + achievements
+            active.append(
+                (
+                    score,
+                    special,
+                    applicant.language_score,
+                    achievements,
+                    int(applicant.code),
+                )
             )
-            active.append((score, 0, 0, 0, int(applicant.code)))
 
         active.sort(key=lambda item: (-item[0], -item[1], -item[2], -item[3], item[4]))
 

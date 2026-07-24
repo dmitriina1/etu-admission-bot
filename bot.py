@@ -347,6 +347,31 @@ async def run_table(chat_id: int, direction_code: str, applicant_code: str) -> N
             chat_id,
         )
 
+def _sample_component_vector(
+    rng: np.random.Generator,
+    bands: tuple[tuple[int, int, float], ...],
+    simulations: int,
+) -> np.ndarray:
+    probabilities = np.array([band[2] for band in bands], dtype=float)
+    probabilities /= probabilities.sum()
+    selected = rng.choice(len(bands), size=simulations, p=probabilities)
+    values = np.zeros(simulations, dtype=np.int16)
+
+    for band_index, (low, high, _) in enumerate(bands):
+        mask = selected == band_index
+        count = int(mask.sum())
+        if not count:
+            continue
+        if low == high:
+            values[mask] = low
+        else:
+            values[mask] = np.rint(
+                rng.triangular(low, (low + high) / 2, high, count)
+            ).astype(np.int16)
+
+    return values
+
+
 def vectorized_forecast(
     applicants: list[Applicant],
     applicant_code: str,
@@ -367,46 +392,52 @@ def vectorized_forecast(
         above = np.zeros(simulations, dtype=np.int16)
 
         for applicant in competitors:
-            if applicant.has_known_score:
-                outranks = applicant_outranks(applicant, target)
-                if outranks:
-                    p = stay_probability(applicant, scenario, unknown=False)
-                    above += rng.random(simulations) <= p
+            # По принятому правилу ноль по иностранному языку означает недопуск.
+            if applicant.language_score <= 0:
                 continue
 
-            active = (
-                (rng.random(simulations) <= scenario.unknown_gets_score)
-                & (
-                    rng.random(simulations)
-                    <= stay_probability(applicant, scenario, unknown=True)
-                )
+            incomplete = (
+                applicant.special_score <= 0
+                or applicant.achievements_score <= 0
             )
+            p = stay_probability(applicant, scenario, unknown=incomplete)
+            active = rng.random(simulations) <= p
             if not np.any(active):
                 continue
 
-            band_prob = np.array(
-                [band[2] for band in scenario.unknown_score_bands], dtype=float
-            )
-            band_prob /= band_prob.sum()
-            bands = rng.choice(len(band_prob), size=simulations, p=band_prob)
-            scores = np.zeros(simulations, dtype=np.int16)
-            for band_index, (low, high, _) in enumerate(
-                scenario.unknown_score_bands
-            ):
-                mask = bands == band_index
-                count = int(mask.sum())
-                if count:
-                    scores[mask] = np.rint(
-                        rng.triangular(low, (low + high) / 2, high, count)
-                    ).astype(np.int16)
+            if applicant.special_score > 0:
+                special = np.full(
+                    simulations, applicant.special_score, dtype=np.int16
+                )
+            else:
+                special = _sample_component_vector(
+                    rng, scenario.special_score_bands, simulations
+                )
 
-            # Для неизвестного результата известен только смоделированный общий
-            # балл. Состав результата пока неизвестен, поэтому при точном равенстве
-            # используем ID лишь как нейтральный последний критерий. После появления
-            # реальных компонентов применяется полный официальный порядок.
-            outranks = (scores > target.real_score) | (
-                (scores == target.real_score) & (int(applicant.code) < target_code)
-            )
+            if applicant.achievements_score > 0:
+                achievements = np.full(
+                    simulations, applicant.achievements_score, dtype=np.int16
+                )
+            else:
+                achievements = _sample_component_vector(
+                    rng, scenario.achievements_score_bands, simulations
+                )
+
+            language = applicant.language_score
+            scores = special + language + achievements
+
+            # Полный порядок при равенстве: общий балл, спецдисциплина,
+            # иностранный язык, ИД, затем код поступающего.
+            outranks = scores > target.real_score
+            equal_total = scores == target.real_score
+            outranks |= equal_total & (special > target.special_score)
+            equal_special = equal_total & (special == target.special_score)
+            outranks |= equal_special & (language > target.language_score)
+            equal_language = equal_special & (language == target.language_score)
+            outranks |= equal_language & (achievements > target.achievements_score)
+            fully_equal = equal_language & (achievements == target.achievements_score)
+            outranks |= fully_equal & (int(applicant.code) < target_code)
+
             above += active & outranks
 
         positions = above.astype(np.int32) + 1

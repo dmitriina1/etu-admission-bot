@@ -404,7 +404,7 @@ def exact_metrics(
     return {
         "target": target,
         "position": position,
-        "same_score_count": len(same_score),
+        "same_score_count": len(same_score_ordered),
         "same_score_position": same_score_position,
         "above_with_consent": above_with_consent,
         "budget_places": budget_places,

@@ -30,6 +30,7 @@ from etu_rank import (
     parse_applicants,
     parse_budget_places,
     stay_probability,
+    sorted_applicants,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -273,6 +274,65 @@ def directions_text() -> str:
     return "\n".join(lines)
 
 
+
+def build_table_messages(direction_code: str, applicant_code: str) -> list[str]:
+    """Формирует компактную таблицу от первого места до пользователя включительно."""
+    snapshot = load_snapshot(direction_code)
+    ordered = sorted_applicants(snapshot.all_applicants)
+    target_index = next(
+        (index for index, applicant in enumerate(ordered) if applicant.code == applicant_code),
+        None,
+    )
+    if target_index is None:
+        raise RuntimeError("Абитуриент отсутствует в выбранном направлении.")
+
+    title = (
+        f"📊 <b>{html.escape(direction_code)} — {html.escape(snapshot.name)}</b>\n"
+        f"Обновлено: {html.escape(snapshot.updated_at)}\n"
+        f"Показаны места 1–{target_index + 1}. Твоя строка отмечена ←"
+    )
+    header = "<code>Место | ID       | Балл (состав)</code>"
+    rows: list[str] = []
+    for position, applicant in enumerate(ordered[: target_index + 1], start=1):
+        marker = " ←" if applicant.code == applicant_code else ""
+        composition = (
+            f"{applicant.special_score}+{applicant.language_score}+"
+            f"{applicant.achievements_score}"
+        )
+        row = (
+            f"{position:>5} | {applicant.code:<8} | "
+            f"{applicant.real_score:>3} ({composition}){marker}"
+        )
+        rows.append(f"<code>{html.escape(row)}</code>")
+
+    # Не режем HTML-теги посередине: собираем отдельные Telegram-сообщения.
+    messages: list[str] = []
+    current = title + "\n\n" + header
+    for row in rows:
+        candidate = current + "\n" + row
+        if len(candidate) > 3700:
+            messages.append(current)
+            current = title + "\n\n" + header + "\n" + row
+        else:
+            current = candidate
+    messages.append(current)
+    return messages
+
+
+async def run_table(chat_id: int, direction_code: str, applicant_code: str) -> None:
+    try:
+        messages = await asyncio.to_thread(
+            build_table_messages, direction_code, applicant_code
+        )
+        for message in messages:
+            send_message(message, chat_id)
+    except Exception as error:
+        log.exception("Table command failed")
+        send_message(
+            f"Ошибка /table: <code>{html.escape(str(error))}</code>",
+            chat_id,
+        )
+
 def vectorized_forecast(
     applicants: list[Applicant],
     applicant_code: str,
@@ -366,8 +426,7 @@ def build_forecast_message(direction_code: str, applicant_code: str) -> str:
         f"🎲 <b>Прогноз: {html.escape(direction_code)} — {html.escape(snapshot.name)}</b>",
         f"Код: <code>{html.escape(applicant_code)}</code>",
         f"Данные обновлены: {html.escape(snapshot.updated_at)}",
-        f"Симуляций на сценарий: <b>{FORECAST_SIMULATIONS:,}</b>".replace(",", " "),
-        "<i>Это сценарная модель, а не официальная вероятность.</i>",
+        f"Симуляций на сценарий: <b>{FORECAST_SIMULATIONS:,}</b>".replace(",", " ")
     ]
     for result in results:
         lines.extend(
@@ -568,9 +627,6 @@ def build_realplace_message(applicant_code: str) -> str:
 
     lines.extend(
         [
-            "",
-            "<i>Это расчётная модель. Она не заменяет официальный конкурсный список "
-            "и может измениться при новых баллах, согласиях и приоритетах.</i>",
         ]
     )
     return "\n".join(lines)
@@ -737,6 +793,7 @@ async def telegram_webhook(
             "/check — проверить данные сейчас\n"
             "/directions — коды бюджетных направлений\n"
             "/forecast 2.3 — прогноз выбранного направления\n"
+            "/table 2.3 — таблица рейтинга до твоего места\n"
             "/realplace — место с учётом распределения по приоритетам\n"
             "/remove — удалить код и отключить уведомления",
             chat_id,
@@ -811,6 +868,26 @@ async def telegram_webhook(
                 tasks.add_task(
                     run_forecast, chat_id, direction_code, applicant_code
                 )
+
+
+    elif command == "/table":
+        applicant_code = require_code(chat_id)
+        if applicant_code:
+            if len(args) != 1:
+                send_message(
+                    "Использование: <code>/table 2.3</code>\n"
+                    "Коды направлений: /directions",
+                    chat_id,
+                )
+            else:
+                try:
+                    direction_code = resolve_direction(args[0])
+                except ValueError as error:
+                    send_message(str(error), chat_id)
+                else:
+                    tasks.add_task(
+                        run_table, chat_id, direction_code, applicant_code
+                    )
 
     elif command == "/realplace":
         applicant_code = require_code(chat_id)

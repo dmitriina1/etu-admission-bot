@@ -76,6 +76,7 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 app = FastAPI(title="ETU admission Telegram bot")
 forecast_lock = asyncio.Lock()
 realplace_lock = asyncio.Lock()
+priority2_lock = asyncio.Lock()
 
 
 @dataclass(frozen=True)
@@ -672,6 +673,161 @@ def build_realplace_message(applicant_code: str) -> str:
     return "\n".join(lines)
 
 
+
+def split_html_lines(lines: list[str], limit: int = 3600) -> list[str]:
+    """Делит сообщение по строкам, не разрывая HTML-теги посередине строки."""
+    chunks: list[str] = []
+    current: list[str] = []
+    current_size = 0
+    for line in lines:
+        extra = len(line) + (1 if current else 0)
+        if current and current_size + extra > limit:
+            chunks.append("\n".join(current))
+            current = [line]
+            current_size = len(line)
+        else:
+            current.append(line)
+            current_size += extra
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
+def first_priority_result(
+    snapshots: list[ListSnapshot], applicant_code: str
+) -> list[tuple[ListSnapshot, Applicant, int, str]]:
+    """Возвращает направления кандидата с приоритетом №1 и его текущий статус."""
+    results: list[tuple[ListSnapshot, Applicant, int, str]] = []
+    for snapshot in snapshots:
+        candidate = find_target(snapshot.all_applicants, applicant_code)
+        if candidate is None or candidate.priority != 1:
+            continue
+
+        raw_priority1 = [a for a in snapshot.all_applicants if a.priority == 1]
+        raw_ordered = sorted_applicants(raw_priority1)
+        raw_position = next(
+            index
+            for index, applicant in enumerate(raw_ordered, start=1)
+            if applicant.code == applicant_code
+        )
+        budget = int(snapshot.budget_places or 0)
+
+        if candidate.language_score <= 0:
+            status = "❌ не допущен: иностранный язык = 0"
+            position = raw_position
+        elif not candidate.has_consent:
+            status = "⚪ нет согласия на зачисление"
+            position = raw_position
+        else:
+            eligible = [
+                a
+                for a in snapshot.all_applicants
+                if a.priority == 1 and is_eligible_for_allocation(a)
+            ]
+            ordered = sorted_applicants(eligible)
+            position = next(
+                index
+                for index, applicant in enumerate(ordered, start=1)
+                if applicant.code == applicant_code
+            )
+            status = "✅ проходит" if budget > 0 and position <= budget else "❌ не проходит"
+
+        results.append((snapshot, candidate, position, status))
+    return results
+
+
+def build_priority2_messages(
+    applicant_code: str, direction_code: str | None = None
+) -> list[str]:
+    """Показывает всех кандидатов с приоритетом №2 выше пользователя.
+
+    Для каждого кандидата ищется его направление с приоритетом №1 и выводится
+    текущее место относительно числа бюджетных мест.
+    """
+    snapshots = load_all_snapshots()
+    by_code = {snapshot.direction_code: snapshot for snapshot in snapshots}
+
+    if direction_code is not None:
+        if direction_code not in DIRECTIONS:
+            raise ValueError("Неизвестный код направления. Используй /directions.")
+        selected = [by_code[direction_code]] if direction_code in by_code else []
+    else:
+        selected = matching_snapshots(snapshots, applicant_code)
+
+    if not selected:
+        raise RuntimeError("Код не найден в выбранных направлениях.")
+
+    messages: list[str] = []
+    for snapshot in selected:
+        target = find_target(snapshot.all_applicants, applicant_code)
+        if target is None:
+            messages.append(
+                f"<b>{html.escape(snapshot.direction_code)} — {html.escape(snapshot.name)}</b>\n"
+                "Твой код в этом направлении отсутствует."
+            )
+            continue
+
+        candidates = [
+            applicant
+            for applicant in snapshot.all_applicants
+            if applicant.code != applicant_code
+            and applicant.priority == 2
+            and applicant_outranks(applicant, target)
+        ]
+        candidates = sorted_applicants(candidates)
+
+        lines = [
+            f"🔎 <b>Приоритеты №2 выше тебя</b>",
+            f"<b>{html.escape(snapshot.direction_code)} — {html.escape(snapshot.name)}</b>",
+            f"Твоё место по баллам: <b>{exact_metrics(snapshot.all_applicants, applicant_code, snapshot.budget_places)['position']}</b>",
+            f"Кандидатов с приоритетом №2 выше: <b>{len(candidates)}</b>",
+        ]
+
+        if not candidates:
+            lines.append("Таких кандидатов нет.")
+            messages.extend(split_html_lines(lines))
+            continue
+
+        for index, candidate in enumerate(candidates, start=1):
+            lines.extend(
+                [
+                    "",
+                    f"<b>{index}. <code>{html.escape(candidate.code)}</code></b> — "
+                    f"{candidate.real_score} "
+                    f"({candidate.special_score}+{candidate.language_score}+{candidate.achievements_score})",
+                    f"На этом направлении: приоритет №2",
+                ]
+            )
+
+            first_results = first_priority_result(snapshots, candidate.code)
+            if not first_results:
+                lines.append("Приоритет №1 среди отслеживаемых списков не найден.")
+                continue
+
+            for first_snapshot, _, position, status in first_results:
+                budget = first_snapshot.budget_places or 0
+                compact_status = status
+                compact_status = compact_status.replace("✅ проходит", "Проходит")
+                compact_status = compact_status.replace("❌ не проходит", "Не проходит")
+                compact_status = compact_status.replace(
+                    "❌ не допущен: иностранный язык = 0",
+                    "Не допущен: иностранный язык = 0",
+                )
+                compact_status = compact_status.replace(
+                    "⚪ нет согласия на зачисление",
+                    "Нет согласия на зачисление",
+                )
+                lines.append(
+                    f"Приоритет №1: <b>{html.escape(first_snapshot.direction_code)}</b>"
+                )
+                lines.append(
+                    f"<b>{position}/{budget if budget else '?'}</b> — {compact_status}"
+                )
+
+        messages.extend(split_html_lines(lines))
+
+    return messages
+
 def update_marker(snapshots: list[ListSnapshot]) -> str:
     return "|".join(
         f"{snapshot.list_id}:{snapshot.updated_at}" for snapshot in snapshots
@@ -763,6 +919,28 @@ async def run_realplace(chat_id: int, applicant_code: str) -> None:
             )
 
 
+
+async def run_priority2(
+    chat_id: int, applicant_code: str, direction_code: str | None
+) -> None:
+    if priority2_lock.locked():
+        send_message("Расчёт /priority2 уже выполняется. Попробуй чуть позже.", chat_id)
+        return
+    async with priority2_lock:
+        send_message("Загружаю списки и проверяю приоритеты №1 кандидатов выше…", chat_id)
+        try:
+            messages = await asyncio.to_thread(
+                build_priority2_messages, applicant_code, direction_code
+            )
+            for message in messages:
+                send_message(message, chat_id)
+        except Exception as error:
+            log.exception("Priority2 analysis failed")
+            send_message(
+                f"Ошибка /priority2: <code>{html.escape(str(error))}</code>",
+                chat_id,
+            )
+
 def require_code(chat_id: int) -> str | None:
     code = get_user_code(chat_id)
     if code is None:
@@ -835,6 +1013,8 @@ async def telegram_webhook(
             "/forecast 2.3 — прогноз выбранного направления\n"
             "/table 2.3 — таблица рейтинга до твоего места\n"
             "/realplace — место с учётом распределения по приоритетам\n"
+            "/priority2 — все кандидаты с приоритетом №2 выше тебя\n"
+            "/priority2 2.3 — то же для одного направления\n"
             "/remove — удалить код и отключить уведомления",
             chat_id,
         )
@@ -928,6 +1108,26 @@ async def telegram_webhook(
                     tasks.add_task(
                         run_table, chat_id, direction_code, applicant_code
                     )
+
+
+    elif command == "/priority2":
+        applicant_code = require_code(chat_id)
+        if applicant_code:
+            direction_code: str | None = None
+            if len(args) > 1:
+                send_message(
+                    "Использование: <code>/priority2</code> или "
+                    "<code>/priority2 2.3</code>",
+                    chat_id,
+                )
+                return {"ok": True}
+            if args:
+                try:
+                    direction_code = resolve_direction(args[0])
+                except ValueError as error:
+                    send_message(str(error), chat_id)
+                    return {"ok": True}
+            tasks.add_task(run_priority2, chat_id, applicant_code, direction_code)
 
     elif command == "/realplace":
         applicant_code = require_code(chat_id)

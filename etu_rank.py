@@ -242,10 +242,13 @@ def fetch_html(
         API_URL,
         params=params,
         headers={
-            "Accept": "text/html",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+            "Referer": "https://abit.etu.ru/ru/postupayushhim/lists/page/",
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 Chrome/130 Safari/537.36"
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/130.0.0.0 Safari/537.36"
             ),
         },
         timeout=30,

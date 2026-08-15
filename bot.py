@@ -196,16 +196,27 @@ def load_snapshot(direction_code: str) -> ListSnapshot:
         raise ValueError(f"Неизвестное направление: {direction_code}") from error
 
     with requests.Session() as session:
-        full_html = fetch_html(session, list_id, [], body_only=False)
+        # В текущей версии сайта начальная загрузка таблицы выполняется
+        # с фильтром 1st_priority. Без него list.html может вернуть
+        # заголовок таблицы с пустым tbody.
+        full_html = fetch_html(session, list_id, ["1st_priority"], body_only=False)
+        # bodyOnly=true без filters[] соответствует снятым фильтрам и должен
+        # возвращать всех поступающих, включая приоритеты 2+.
         body_html = fetch_html(session, list_id, [], body_only=True)
 
     level = direction_level(direction_code)
-    # Полная страница обычно содержит заголовки таблицы, поэтому сначала
-    # парсим её: так дополнительные служебные колонки не сдвигают данные.
     try:
-        applicants = parse_applicants(full_html, education_level=level)
-    except Exception:
         applicants = parse_applicants(body_html, education_level=level)
+    except Exception as all_error:
+        # Если endpoint полного списка временно отдал пустой tbody, не валим
+        # всё направление: используем хотя бы гарантированно доступный список
+        # с первым приоритетом и пишем предупреждение в лог.
+        log.warning(
+            "All-priorities response is empty for %s; falling back to first priority: %s",
+            direction_code,
+            all_error,
+        )
+        applicants = parse_applicants(full_html, education_level=level)
     return ListSnapshot(
         direction_code=direction_code,
         name=name,
@@ -955,6 +966,19 @@ async def run_forecast(
             )
 
 
+async def run_status(chat_id: int, applicant_code: str) -> None:
+    send_message("Загружаю конкурсные списки…", chat_id)
+    try:
+        snapshots = await asyncio.to_thread(load_all_snapshots)
+        send_message(status_text(snapshots, applicant_code), chat_id)
+    except Exception as error:
+        log.exception("Status check failed")
+        send_message(
+            f"Ошибка: <code>{html.escape(str(error))}</code>",
+            chat_id,
+        )
+
+
 async def run_realplace(chat_id: int, applicant_code: str) -> None:
     if realplace_lock.locked():
         send_message("Расчёт /realplace уже выполняется. Попробуй чуть позже.", chat_id)
@@ -1080,23 +1104,15 @@ async def telegram_webhook(
             send_message("Использование: <code>/setcode 1203485</code>", chat_id)
             return {"ok": True}
         applicant_code = args[0]
-        try:
-            snapshots = await asyncio.to_thread(load_all_snapshots)
-            if not code_exists(snapshots, applicant_code):
-                send_message(
-                    f"Код не найден ни в одном из {len(DIRECTIONS)} отслеживаемых направлений. "
-                    "Проверь цифры и попробуй снова.",
-                    chat_id,
-                )
-                return {"ok": True}
-            save_user(chat_id, applicant_code)
-            send_message(
-                f"✅ Код сохранён: <code>{html.escape(applicant_code)}</code>\n"
-                "Автоматические уведомления включены.",
-                chat_id,
-            )
-        except Exception as error:
-            send_message(f"Ошибка: <code>{html.escape(str(error))}</code>", chat_id)
+        # Не скачиваем все конкурсные списки внутри webhook. Telegram ждёт
+        # быстрый HTTP 200 и повторяет update, если ответ идёт слишком долго.
+        # Из-за этого раньше одно /setcode могло приходить несколько раз.
+        save_user(chat_id, applicant_code)
+        send_message(
+            f"✅ Код сохранён: <code>{html.escape(applicant_code)}</code>\n"
+            "Автоматические уведомления включены.",
+            chat_id,
+        )
 
     elif command == "/mycode":
         applicant_code = get_user_code(chat_id)
@@ -1121,13 +1137,9 @@ async def telegram_webhook(
     elif command in {"/status", "/check"}:
         applicant_code = require_code(chat_id)
         if applicant_code:
-            try:
-                snapshots = await asyncio.to_thread(load_all_snapshots)
-                send_message(status_text(snapshots, applicant_code), chat_id)
-            except Exception as error:
-                send_message(
-                    f"Ошибка: <code>{html.escape(str(error))}</code>", chat_id
-                )
+            # Долгую загрузку выполняем после немедленного ответа webhook,
+            # чтобы Telegram не присылал один и тот же update повторно.
+            tasks.add_task(run_status, chat_id, applicant_code)
 
     elif command == "/directions":
         send_message(directions_text(), chat_id)

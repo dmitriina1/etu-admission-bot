@@ -269,26 +269,50 @@ def format_mode(
     applicants: list[Applicant],
     applicant_code: str,
     budget_places: int | None,
+    *,
+    virtual_target: Applicant | None = None,
 ) -> str:
     metrics = exact_metrics(applicants, applicant_code, budget_places)
+    virtual = False
+
+    # Для режимов первого приоритета кандидат с приоритетом 2+ обычно
+    # отсутствует в отфильтрованном списке. Вместо «отсутствует» показываем,
+    # какое место он занимал бы с теми же баллами, если бы выбрал это
+    # направление первым приоритетом. Сортировка от priority не зависит.
+    if metrics is None and virtual_target is not None:
+        virtual_applicants = [
+            applicant for applicant in applicants
+            if applicant.code != applicant_code
+        ]
+        virtual_applicants.append(virtual_target)
+        applicants = virtual_applicants
+        metrics = exact_metrics(applicants, applicant_code, budget_places)
+        virtual = metrics is not None
+
     if metrics is None:
         return f"<b>{html.escape(mode_name)}</b>\nАбитуриент отсутствует (строк: {len(applicants)})"
 
     target = metrics["target"]
     assert isinstance(target, Applicant)
+
+    display_name = mode_name
+    if virtual and mode_name == "Только приоритет №1":
+        display_name = "Если бы был приоритет №1"
+    elif virtual and mode_name == "Приоритет №1 + согласие":
+        display_name = "Если бы был приоритет №1 + согласие"
+
     lines = [
-        f"<b>{html.escape(mode_name)}</b>",
+        f"<b>{html.escape(display_name)}</b>",
         f"Место: <b>{metrics['position']}</b> из {len(applicants)}",
         f"Балл: <b>{target.real_score}</b> ({score_composition(target)})",
-        f"Приоритет: {target.priority}; согласие: {'да' if target.has_consent else 'нет'}",
         f"Выше с согласием: {metrics['above_with_consent']}",
     ]
     if budget_places:
         lines.append(f"Бюджетных мест: {budget_places}")
+        # «До бюджетной зоны: N» убираем: для кандидатов с приоритетом 2+
+        # полезнее видеть виртуальное место в списке первого приоритета.
         if metrics["position"] <= budget_places:
             lines.append(f"Запас до границы: {metrics['reserve']} мест")
-        else:
-            lines.append(f"До бюджетной зоны: {metrics['reserve']} мест")
         if metrics["cutoff_score"] is not None:
             lines.append(f"Текущий проходной балл: {metrics['cutoff_score']}")
         lines.append(f"Неизвестных баллов: {metrics['unknown_count']}")
@@ -300,9 +324,22 @@ def format_snapshot(snapshot: ListSnapshot, applicant_code: str) -> str:
         f"📋 <b>{html.escape(snapshot.direction_code)} — {html.escape(snapshot.name)}</b>",
         f"Обновлено: <b>{html.escape(snapshot.updated_at)}</b>",
     ]
+
+    target = find_target(snapshot.all_applicants, applicant_code)
     for mode_name in DISPLAY_MODES:
         applicants = snapshot.modes[mode_name]
-        parts.append(format_mode(mode_name, applicants, applicant_code, snapshot.budget_places))
+        virtual_target = None
+        if target is not None and mode_name != "Все приоритеты":
+            virtual_target = target
+        parts.append(
+            format_mode(
+                mode_name,
+                applicants,
+                applicant_code,
+                snapshot.budget_places,
+                virtual_target=virtual_target,
+            )
+        )
     return "\n\n".join(parts)
 
 

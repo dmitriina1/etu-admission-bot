@@ -53,6 +53,7 @@ class Applicant:
     target_achievements_score: int
     consent: str
     status: str
+    education_level: str = "phd"
 
     @property
     def real_score(self) -> int:
@@ -261,10 +262,16 @@ def parse_budget_places(html: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def parse_applicants(html: str) -> list[Applicant]:
+def parse_applicants(html: str, education_level: str | None = None) -> list[Applicant]:
+    """Читает таблицу аспирантуры или магистратуры.
+
+    Парсер в первую очередь ориентируется на названия колонок, поэтому
+    дополнительные служебные колонки сайта не сдвигают баллы/согласие.
+    Для магистратуры поле special_score используется как балл за единственное
+    вступительное испытание, language_score всегда равно нулю.
+    """
     soup = BeautifulSoup(html, "html.parser")
     table = soup.find("table")
-
     if table is None:
         raise RuntimeError("В ответе API не найдена таблица.")
 
@@ -272,6 +279,31 @@ def parse_applicants(html: str) -> list[Applicant]:
     if tbody is None:
         raise RuntimeError("В таблице не найден tbody.")
 
+    header_cells = table.select("thead th")
+    headers = [clean_text(cell.get_text(" ", strip=True)) for cell in header_cells]
+    header_map = {name.lower(): index for index, name in enumerate(headers)}
+
+    def find_col(*names: str) -> int | None:
+        for name in names:
+            key = name.lower()
+            if key in header_map:
+                return header_map[key]
+        return None
+
+    code_i = find_col("Уникальный код поступающего")
+    priority_i = find_col("Приоритет №", "Приоритет")
+    terms_i = find_col("Условия зачисления")
+    total_i = find_col("Конкурсный балл")
+    special_i = find_col("Спец. дисциплина", "Спец дисциплина")
+    language_i = find_col("Ин. яз", "Иностранный язык")
+    exam_i = find_col("Балл за вступительное испытание")
+    achievements_i = find_col("ИД")
+    target_achievements_i = find_col("ИД целевые")
+    consent_i = find_col("Согласие на зачисление")
+    status_i = find_col("Статус заявления")
+    position_i = find_col("№")
+
+    is_master = education_level == "master" or (education_level is None and exam_i is not None)
     applicants: list[Applicant] = []
 
     for row in tbody.find_all("tr", recursive=False):
@@ -279,43 +311,74 @@ def parse_applicants(html: str) -> list[Applicant]:
             clean_text(cell.get_text(" ", strip=True))
             for cell in row.find_all(["td", "th"], recursive=False)
         ]
-
-        if len(cells) < 11:
+        if not cells:
             continue
 
-        code = cells[1]
+        def cell(index: int | None, fallback: int | None = None) -> str:
+            selected = index if index is not None else fallback
+            if selected is None or selected < 0 or selected >= len(cells):
+                return ""
+            return cells[selected]
+
+        # Fallback нужен для bodyOnly-ответов без thead.
+        # Магистратура обычно имеет 10 основных колонок, аспирантура — 11+.
+        fallback_master = education_level is None and not headers and len(cells) == 10
+        master_row = is_master or fallback_master
+
+        code = cell(code_i, 1)
         if not code.isdigit():
             continue
 
+        if master_row:
+            exam = parse_int(cell(exam_i, 5))
+            language = 0
+            achievements = parse_int(cell(achievements_i, 6))
+            target_achievements = parse_int(cell(target_achievements_i, 7))
+            consent = cell(consent_i, 8)
+            status = cell(status_i, 9)
+            level = "master"
+        else:
+            exam = parse_int(cell(special_i, 5))
+            language = parse_int(cell(language_i, 6))
+            achievements = parse_int(cell(achievements_i, 7))
+            target_achievements = parse_int(cell(target_achievements_i, 8))
+            # Если заголовки доступны, дополнительные колонки вроде
+            # «ИД при равенстве» не ломают позицию согласия.
+            consent = cell(consent_i, 9)
+            status = cell(status_i, 10)
+            level = "phd"
+
         applicants.append(
             Applicant(
-                site_position=parse_int(cells[0], len(applicants) + 1),
+                site_position=parse_int(cell(position_i, 0), len(applicants) + 1),
                 code=code,
-                priority=parse_int(cells[2], -1),
-                enrollment_terms=cells[3],
-                displayed_score=parse_int(cells[4]),
-                special_score=parse_int(cells[5]),
-                language_score=parse_int(cells[6]),
-                achievements_score=parse_int(cells[7]),
-                target_achievements_score=parse_int(cells[8]),
-                consent=cells[9],
-                status=cells[10],
+                priority=parse_int(cell(priority_i, 2), -1),
+                enrollment_terms=cell(terms_i, 3),
+                displayed_score=parse_int(cell(total_i, 4)),
+                special_score=exam,
+                language_score=language,
+                achievements_score=achievements,
+                target_achievements_score=target_achievements,
+                consent=consent,
+                status=status,
+                education_level=level,
             )
         )
 
     if not applicants:
         raise RuntimeError("Не удалось прочитать ни одной строки таблицы.")
-
     return applicants
 
 
-def applicant_sort_key(applicant: Applicant) -> tuple[int, int, int, int, int]:
-    """Официальный порядок при равном конкурсном балле.
-
-    Сначала сравнивается общий балл, затем специальная дисциплина,
-    иностранный язык, индивидуальные достижения и только потом ID.
-    Отрицательные значения нужны для сортировки по убыванию.
-    """
+def applicant_sort_key(applicant: Applicant) -> tuple[int, ...]:
+    """Порядок при равном конкурсном балле для каждого уровня."""
+    if applicant.education_level == "master":
+        return (
+            -applicant.real_score,
+            -applicant.special_score,  # вступительное испытание
+            -applicant.achievements_score,
+            int(applicant.code),
+        )
     return (
         -applicant.real_score,
         -applicant.special_score,

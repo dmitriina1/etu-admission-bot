@@ -47,8 +47,8 @@ FORECAST_LIST = os.getenv("FORECAST_LIST", "2.3")
 SEED = int(os.getenv("SEED", "20260723"))
 
 # Код направления -> (название, ID конкурсного списка).
-# Порядок сохраняется в /directions и при обходе всех списков.
-DIRECTIONS: dict[str, tuple[str, str]] = {
+# Аспирантура и магистратура живут в одном пространстве команд.
+PHD_DIRECTIONS: dict[str, tuple[str, str]] = {
     "1.2": ("Компьютерные науки и информатика", "019ee53c-e6ac-7b31-af10-3a9848e2582b"),
     "1.3": ("Физические науки", "019ee53c-e6ac-7b6d-af10-3a984961511e"),
     "1.4": ("Химические науки", "019ee53c-e6ac-7a81-af10-3a9846d3f886"),
@@ -63,6 +63,35 @@ DIRECTIONS: dict[str, tuple[str, str]] = {
     "5.7": ("Философия", "019ee53c-e6ac-79b1-af10-3a98450d897f"),
     "5.9": ("Филология", "019ee53c-e6ac-78d5-af10-3a9843c6325c"),
 }
+
+MASTER_DIRECTIONS: dict[str, tuple[str, str]] = {
+    "01.04.02": ("Прикладная математика и информатика", "019ee539-ec19-7d4e-9124-5a383e3416d9"),
+    "09.04.00": ("Информатика и вычислительная техника (многопрофильный конкурс)", "019ee539-ec19-7df2-9124-5a383feb3491"),
+    "11.04.01": ("Радиотехника", "019ee539-ec19-7c3a-9124-5a383c1c15d5"),
+    "11.04.02": ("Инфокоммуникационные технологии и системы связи", "019ee539-ec19-7c76-9124-5a383ca47f5e"),
+    "11.04.03": ("Конструирование и технология электронных средств", "019ee539-ec19-7cae-9124-5a383ca516ad"),
+    "11.04.04": ("Электроника и наноэлектроника", "019ee539-ec19-7ce2-9124-5a383d2cc061"),
+    "12.04.01": ("Приборостроение", "019ee539-ec19-7dba-9124-5a383f0525d8"),
+    "12.04.04": ("Биотехнические системы и технологии", "019ee539-ec19-789a-9124-5a3836d00edd"),
+    "13.04.02": ("Электроэнергетика и электротехника", "019ee539-ec19-7bce-9124-5a383a6c1068"),
+    "15.04.06": ("Мехатроника и робототехника", "019ee53b-67fd-7dc0-aad0-d302cb1b955a"),
+    "20.04.01": ("Техносферная безопасность", "019ee539-ec19-7a02-9124-5a3837c3197e"),
+    "27.04.02": ("Управление качеством", "019ee539-ec19-7a9e-9124-5a38386ccf7a"),
+    "27.04.03": ("Системный анализ и управление", "019ee539-ec19-7d86-9124-5a383eeee600"),
+    # Код 27.04.04 встречается у двух разных конкурсных списков, поэтому
+    # в командах добавлены короткие суффиксы -1 и -2.
+    "27.04.04-1": ("Управление в технических системах (Автоматика и мехатроника)", "019ee539-ec19-7b96-9124-5a3839d883fe"),
+    "27.04.04-2": ("Управление в технических системах (Управление и информационные технологии в технических системах)", "019ee539-ec19-7c02-9124-5a383b6aef88"),
+    "27.04.05": ("Инноватика", "019ee539-ec19-7ae2-9124-5a3838a7b502"),
+    "28.04.01": ("Нанотехнологии и микросистемная техника", "019ee539-ec19-7d1a-9124-5a383d37fce5"),
+    "42.04.01": ("Реклама и связи с общественностью", "019ee539-ec19-7b22-9124-5a38393ebcbc"),
+    "45.04.02": ("Лингвистика", "019ee539-ec19-7b5e-9124-5a3839cda284"),
+}
+
+DIRECTIONS: dict[str, tuple[str, str]] = {**PHD_DIRECTIONS, **MASTER_DIRECTIONS}
+
+def direction_level(direction_code: str) -> str:
+    return "master" if direction_code in MASTER_DIRECTIONS else "phd"
 
 
 # Режим «Только с согласием» намеренно удалён.
@@ -170,7 +199,13 @@ def load_snapshot(direction_code: str) -> ListSnapshot:
         full_html = fetch_html(session, list_id, [], body_only=False)
         body_html = fetch_html(session, list_id, [], body_only=True)
 
-    applicants = parse_applicants(body_html)
+    level = direction_level(direction_code)
+    # Полная страница обычно содержит заголовки таблицы, поэтому сначала
+    # парсим её: так дополнительные служебные колонки не сдвигают данные.
+    try:
+        applicants = parse_applicants(full_html, education_level=level)
+    except Exception:
+        applicants = parse_applicants(body_html, education_level=level)
     return ListSnapshot(
         direction_code=direction_code,
         name=name,
@@ -209,6 +244,15 @@ def code_exists(snapshots: list[ListSnapshot], applicant_code: str) -> bool:
     return bool(matching_snapshots(snapshots, applicant_code))
 
 
+def score_composition(applicant: Applicant) -> str:
+    if applicant.education_level == "master":
+        return f"{applicant.special_score} + {applicant.achievements_score}"
+    return (
+        f"{applicant.special_score} + {applicant.language_score} + "
+        f"{applicant.achievements_score}"
+    )
+
+
 def format_mode(
     mode_name: str,
     applicants: list[Applicant],
@@ -224,8 +268,7 @@ def format_mode(
     lines = [
         f"<b>{html.escape(mode_name)}</b>",
         f"Место: <b>{metrics['position']}</b> из {len(applicants)}",
-        f"Балл: <b>{target.real_score}</b> "
-        f"({target.special_score} + {target.language_score} + {target.achievements_score})",
+        f"Балл: <b>{target.real_score}</b> ({score_composition(target)})",
         f"Приоритет: {target.priority}; согласие: {'да' if target.has_consent else 'нет'}",
         f"Выше с согласием: {metrics['above_with_consent']}",
     ]
@@ -270,20 +313,26 @@ def resolve_direction(argument: str) -> str:
     value = argument.strip().replace(",", ".")
     if value not in DIRECTIONS:
         raise ValueError(
-            "Неизвестный код направления. Используй /directions, "
-            "например <code>/forecast 2.3</code>."
+            "Неизвестный код направления. Используй /directions."
         )
     return value
 
 
 def directions_text() -> str:
-    lines = ["<b>Бюджетные направления</b>"]
-    for code, (name, _) in DIRECTIONS.items():
+    lines = ["<b>Аспирантура — бюджет</b>"]
+    for code, (name, _) in PHD_DIRECTIONS.items():
         lines.append(f"<code>{code}</code> — {html.escape(name)}")
+
+    lines.extend(["", "<b>Магистратура — бюджет</b>"])
+    for code, (name, _) in MASTER_DIRECTIONS.items():
+        lines.append(f"<code>{code}</code> — {html.escape(name)}")
+
     lines.extend(
         [
             "",
-            "Пример: <code>/forecast 2.3</code>",
+            "Для двух списков 27.04.04 используются коды "
+            "<code>27.04.04-1</code> и <code>27.04.04-2</code>.",
+            "Примеры: <code>/table 09.04.00</code>, <code>/priority2 09.04.00</code>.",
         ]
     )
     return "\n".join(lines)
@@ -310,10 +359,7 @@ def build_table_messages(direction_code: str, applicant_code: str) -> list[str]:
     rows: list[str] = []
     for position, applicant in enumerate(ordered[: target_index + 1], start=1):
         marker = " ←" if applicant.code == applicant_code else ""
-        composition = (
-            f"{applicant.special_score}+{applicant.language_score}+"
-            f"{applicant.achievements_score}"
-        )
+        composition = score_composition(applicant).replace(" ", "")
         row = (
             f"{position:>5} | {applicant.code:<8} | "
             f"{applicant.real_score:>3} ({composition}){marker}"
@@ -456,6 +502,11 @@ def vectorized_forecast(
 
 def build_forecast_message(direction_code: str, applicant_code: str) -> str:
     snapshot = load_snapshot(direction_code)
+    if direction_level(direction_code) == "master":
+        raise RuntimeError(
+            "Прогноз для магистратуры пока отключён: у неё другая шкала "
+            "вступительного испытания и ИД. Остальные команды работают."
+        )
     if not snapshot.budget_places:
         raise RuntimeError("Не удалось определить число бюджетных мест.")
 
@@ -487,8 +538,9 @@ def build_forecast_message(direction_code: str, applicant_code: str) -> str:
 
 
 def is_eligible_for_allocation(applicant: Applicant) -> bool:
-    # По принятому правилу нулевой иностранный язык означает выбытие.
-    # Нулевые спецдисциплина или ИД сами по себе кандидата не исключают.
+    if applicant.education_level == "master":
+        return applicant.has_consent and applicant.priority > 0
+    # Для аспирантуры по принятому правилу нулевой иностранный язык означает выбытие.
     return applicant.language_score > 0 and applicant.has_consent and applicant.priority > 0
 
 
@@ -624,8 +676,9 @@ def build_realplace_message(applicant_code: str) -> str:
     lines = [
         "🧭 <b>Расчёт места с учётом других приоритетов</b>",
         f"Код: <code>{html.escape(applicant_code)}</code>",
-        "<i>Учитываются согласие, ненулевой иностранный язык, баллы, "
-        "приоритеты и число бюджетных мест во всех 13 списках.</i>",
+        "<i>Учитываются согласие, баллы, приоритеты и число бюджетных мест "
+        "во всех отслеживаемых списках. Для аспирантуры дополнительно учитывается "
+        "допуск по иностранному языку.</i>",
     ]
 
     if assigned_direction:
@@ -694,11 +747,13 @@ def split_html_lines(lines: list[str], limit: int = 3600) -> list[str]:
 
 
 def first_priority_result(
-    snapshots: list[ListSnapshot], applicant_code: str
+    snapshots: list[ListSnapshot], applicant_code: str, education_level: str | None = None
 ) -> list[tuple[ListSnapshot, Applicant, int, str]]:
     """Возвращает направления кандидата с приоритетом №1 и его текущий статус."""
     results: list[tuple[ListSnapshot, Applicant, int, str]] = []
     for snapshot in snapshots:
+        if education_level is not None and direction_level(snapshot.direction_code) != education_level:
+            continue
         candidate = find_target(snapshot.all_applicants, applicant_code)
         if candidate is None or candidate.priority != 1:
             continue
@@ -712,7 +767,7 @@ def first_priority_result(
         )
         budget = int(snapshot.budget_places or 0)
 
-        if candidate.language_score <= 0:
+        if candidate.education_level == "phd" and candidate.language_score <= 0:
             status = "❌ не допущен: иностранный язык = 0"
             position = raw_position
         elif not candidate.has_consent:
@@ -793,13 +848,14 @@ def build_priority2_messages(
                 [
                     "",
                     f"<b>{index}. <code>{html.escape(candidate.code)}</code></b> — "
-                    f"{candidate.real_score} "
-                    f"({candidate.special_score}+{candidate.language_score}+{candidate.achievements_score})",
+                    f"{candidate.real_score} ({score_composition(candidate).replace(' ', '')})",
                     f"На этом направлении: приоритет №2",
                 ]
             )
 
-            first_results = first_priority_result(snapshots, candidate.code)
+            first_results = first_priority_result(
+                snapshots, candidate.code, candidate.education_level
+            )
             if not first_results:
                 lines.append("Приоритет №1 среди отслеживаемых списков не найден.")
                 continue
@@ -854,15 +910,15 @@ def notify_all_users(snapshots: list[ListSnapshot]) -> tuple[int, int]:
 def check_for_update_and_notify() -> str:
     snapshots = load_all_snapshots()
     marker = update_marker(snapshots)
-    old_marker = get_state("last_update_marker_v2_all_directions")
+    old_marker = get_state("last_update_marker_v3_phd_master")
 
     if old_marker is None:
-        set_state("last_update_marker_v2_all_directions", marker)
+        set_state("last_update_marker_v3_phd_master", marker)
         return "initialized"
     if marker == old_marker:
         return "unchanged"
 
-    set_state("last_update_marker_v2_all_directions", marker)
+    set_state("last_update_marker_v3_phd_master", marker)
     sent, failed = notify_all_users(snapshots)
     log.info(
         "Update marker changed: %s -> %s; sent=%s failed=%s",
@@ -905,7 +961,7 @@ async def run_realplace(chat_id: int, applicant_code: str) -> None:
         return
     async with realplace_lock:
         send_message(
-            "Загружаю 13 списков и рассчитываю распределение по приоритетам…",
+            f"Загружаю {len(DIRECTIONS)} списков и рассчитываю распределение по приоритетам…",
             chat_id,
         )
         try:
@@ -1009,9 +1065,9 @@ async def telegram_webhook(
             "/mycode — показать сохранённый код\n"
             "/status — места во всех списках, где найден код\n"
             "/check — проверить данные сейчас\n"
-            "/directions — коды бюджетных направлений\n"
+            "/directions — коды бюджетных направлений аспирантуры и магистратуры\n"
             "/forecast 2.3 — прогноз выбранного направления\n"
-            "/table 2.3 — таблица рейтинга до твоего места\n"
+            "/table 2.3 — таблица рейтинга до твоего места\n/table 09.04.00 — то же для магистратуры\n"
             "/realplace — место с учётом распределения по приоритетам\n"
             "/priority2 — все кандидаты с приоритетом №2 выше тебя\n"
             "/priority2 2.3 — то же для одного направления\n"
@@ -1028,7 +1084,7 @@ async def telegram_webhook(
             snapshots = await asyncio.to_thread(load_all_snapshots)
             if not code_exists(snapshots, applicant_code):
                 send_message(
-                    "Код не найден ни в одном из 13 отслеживаемых направлений. "
+                    f"Код не найден ни в одном из {len(DIRECTIONS)} отслеживаемых направлений. "
                     "Проверь цифры и попробуй снова.",
                     chat_id,
                 )
